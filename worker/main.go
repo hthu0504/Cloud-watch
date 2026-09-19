@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -22,7 +26,7 @@ type TelemetryEvent struct {
 
 func main() {
 	// -----------------------------
-	// AWS / DynamoDB setup
+	// AWS setup
 	// -----------------------------
 
 	ctx := context.Background()
@@ -35,9 +39,15 @@ func main() {
 		log.Fatal("Failed to load AWS config:", err)
 	}
 
+	// DynamoDB client
 	dynamoClient := dynamodb.NewFromConfig(cfg)
 
 	tableName := "CloudwatchServer"
+
+	// S3 client
+	s3Client := s3.NewFromConfig(cfg)
+
+	bucketName := "cloudwatch-telemetry-demo-2026"
 
 	// -----------------------------
 	// Kafka setup
@@ -81,7 +91,7 @@ func main() {
 		)
 
 		// -----------------------------
-		// Save server state to DynamoDB
+		// Save current state to DynamoDB
 		// -----------------------------
 
 		_, err = dynamoClient.PutItem(ctx, &dynamodb.PutItemInput{
@@ -110,6 +120,43 @@ func main() {
 			continue
 		}
 
-		log.Printf("DynamoDB updated: server=%s\n", event.ServerID)
+		log.Printf(
+			"DynamoDB updated: server=%s\n",
+			event.ServerID,
+		)
+
+		// -----------------------------
+		// Archive raw telemetry to S3
+		// -----------------------------
+
+		now := time.Now().UTC()
+
+		s3Key := fmt.Sprintf(
+			"telemetry/year=%04d/month=%02d/day=%02d/%s/partition-%d-offset-%d.json",
+			now.Year(),
+			now.Month(),
+			now.Day(),
+			event.ServerID,
+			message.Partition,
+			message.Offset,
+		)
+
+		_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:      aws.String(bucketName),
+			Key:         aws.String(s3Key),
+			Body:        bytes.NewReader(message.Value),
+			ContentType: aws.String("application/json"),
+		})
+
+		if err != nil {
+			log.Println("Failed to archive telemetry to S3:", err)
+			continue
+		}
+
+		log.Printf(
+			"S3 archived: s3://%s/%s\n",
+			bucketName,
+			s3Key,
+		)
 	}
 }
